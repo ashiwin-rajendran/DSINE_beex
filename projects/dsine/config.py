@@ -38,6 +38,12 @@ def get_args(test=False):
 
     parser.add_argument("--loss_fn", type=str, default="AL")
     parser.add_argument("--loss_gamma", type=float, default=0.8)
+
+    ### ROS Argument parsing #########
+    parser.add_argument("--input_topic", type=str, help="ROS input compressed image topic")
+    parser.add_argument("--output_topic", type=str, help="ROS output compressed image topic")
+    ##################################
+
     # ↑↑↑↑
 
     # read arguments from txt file

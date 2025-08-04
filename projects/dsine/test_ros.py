@@ -26,6 +26,89 @@ from utils.projection import intrins_from_fov, intrins_from_txt
 
 # ↑↑↑↑
 
+## ROS_Interface for testing ###########
+
+import rospy
+from sensor_msgs.msg import CompressedImage
+from cv_bridge import CvBridge
+import threading
+
+
+class ROSInputStream:
+    def __init__(self, input_topic, output_topic, device):
+        self.device = device
+        self.bridge = CvBridge()
+        self.latest_image = None
+        self.image_lock = threading.Lock()
+
+        # ROS setup
+        rospy.init_node("surface_normal_estimation", anonymous=True)
+        self.subscriber = rospy.Subscriber(input_topic, CompressedImage, self.image_callback)
+        self.publisher = rospy.Publisher(output_topic, CompressedImage, queue_size=1)
+
+        # Image processing setup
+        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+    def image_callback(self, msg):
+        try:
+            # cv_image = self.bridge.compressed_imgmsg_to_cv2(msg, "bgr8")
+            np_arr = np.frombuffer(msg.data, np.uint8)
+            cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            with self.image_lock:
+                self.latest_image = cv_image
+        except Exception as e:
+            rospy.logerr(f"Error processing image: {e}")
+
+    def get_sample(self):
+        with self.image_lock:
+            if self.latest_image is None:
+                return None
+            color_image = self.latest_image.copy()
+
+        # Convert to RGB and normalize
+        img = cv2.cvtColor(color_image, cv2.COLOR_BGR2RGB)
+        img = img.astype(np.float32) / 255.0
+        img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(self.device)
+
+        # Padding
+        _, _, orig_H, orig_W = img.shape
+        lrtb = utils.get_padding(orig_H, orig_W)
+        img = F.pad(img, lrtb, mode="constant", value=0.0)
+        img = self.normalize(img)
+
+        # Intrinsics (assuming 60 degree FOV)
+        intrins = intrins_from_fov(new_fov=60.0, H=orig_H, W=orig_W, device=self.device).unsqueeze(0)
+        intrins[:, 0, 2] += lrtb[0]
+        intrins[:, 1, 2] += lrtb[2]
+
+        self.lrtb = lrtb
+        self.new_H, self.new_W = orig_H, orig_W
+
+        return {"color_image": color_image, "img": img, "intrins": intrins}
+
+    def publish_result(self, normal_rgb):
+        try:
+            # Convert normal RGB to BGR for OpenCV
+            normal_bgr = cv2.cvtColor(normal_rgb, cv2.COLOR_RGB2BGR)
+
+            # Create compressed image message
+            msg = CompressedImage()
+            msg.header.stamp = rospy.Time.now()
+            msg.format = "jpeg"
+
+            # Encode image
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 90]
+            _, encimg = cv2.imencode(".jpg", normal_bgr, encode_param)
+            msg.data = encimg.tobytes()
+
+            # Publish
+            self.publisher.publish(msg)
+        except Exception as e:
+            rospy.logerr(f"Error publishing result: {e}")
+
+
+###################
+
 
 def test(args, model, test_loader, device, results_dir=None):
     with torch.no_grad():
@@ -315,6 +398,47 @@ if __name__ == "__main__":
                 enable_auto_exposure=True,
                 enable_auto_white_balance=True,
             )
+
+        elif args.mode == "ros":
+            if not hasattr(args, "input_topic") or not hasattr(args, "output_topic"):
+                raise Exception("ROS mode requires --input_topic and --output_topic arguments")
+
+            InputStream = ROSInputStream(args.input_topic, args.output_topic, device)
+
+            rospy.loginfo(f"Starting ROS surface normal estimation")
+            rospy.loginfo(f"Input topic: {args.input_topic}")
+            rospy.loginfo(f"Output topic: {args.output_topic}")
+
+            rate = rospy.Rate(30)  # 30 Hz
+
+            while not rospy.is_shutdown():
+                with torch.no_grad():
+                    data_dict = InputStream.get_sample()
+                    if data_dict is None:
+                        rate.sleep()
+                        continue
+
+                    # Forward pass (same as demo function)
+                    img = data_dict["img"]
+                    intrins = data_dict["intrins"]
+
+                    norm_out = model(img, intrins=intrins, mode="test")[-1]
+                    norm_out = norm_out[
+                        :,
+                        :,
+                        InputStream.lrtb[2] : InputStream.lrtb[2] + InputStream.new_H,
+                        InputStream.lrtb[0] : InputStream.lrtb[0] + InputStream.new_W,
+                    ]
+                    pred_norm = norm_out[:, :3, :, :]
+
+                    # Convert to RGB for publishing
+                    pred_norm_rgb = vis_utils.normal_to_rgb(pred_norm)[0, ...]
+
+                    # Publish result
+                    InputStream.publish_result(pred_norm_rgb)
+
+                rate.sleep()
+            exit()
 
         elif "youtube.com" in args.mode:
             input_name = "youtube"

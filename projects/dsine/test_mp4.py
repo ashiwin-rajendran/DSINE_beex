@@ -26,6 +26,105 @@ from utils.projection import intrins_from_fov, intrins_from_txt
 
 # ↑↑↑↑
 
+###### For MP4 Video processing ###########
+
+
+class VideoInputStream:
+    def __init__(self, video_path, intrins=None, new_width=1024, device="cuda"):
+        self.device = device
+        self.cap = cv2.VideoCapture(video_path)
+        self.new_width = new_width
+        self.intrins = intrins
+
+        if not self.cap.isOpened():
+            raise ValueError(f"Cannot open video file: {video_path}")
+
+        # Get video properties
+        self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+        self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        # Image processing setup
+        self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+        # Initialize attributes that demo() expects
+        self.lrtb = None
+        self.new_H = None
+        self.new_W = None
+
+        # Get first frame to initialize dimensions
+        self._initialize_dimensions()
+
+        print(f"Video loaded: {video_path}")
+        print(f"FPS: {self.fps}, Total frames: {self.total_frames}")
+
+    def _initialize_dimensions(self):
+        """Initialize dimensions from first frame"""
+        ret, frame = self.cap.read()
+        if ret:
+            # Reset to beginning
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+
+            # Resize if needed
+            if self.new_width > 0:
+                h, w = frame.shape[:2]
+                new_height = int(h * self.new_width / w)
+                frame = cv2.resize(frame, (self.new_width, new_height))
+
+            # Get dimensions for padding
+            orig_H, orig_W = frame.shape[:2]
+            self.lrtb = utils.get_padding(orig_H, orig_W)
+            self.new_H, self.new_W = orig_H, orig_W
+
+    def get_sample(self):
+        ret, frame = self.cap.read()
+        if not ret:
+            # Loop video when it ends
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, frame = self.cap.read()
+            if not ret:
+                return None
+
+        color_image = frame.copy()
+
+        # Resize if needed
+        if self.new_width > 0:
+            h, w = frame.shape[:2]
+            new_height = int(h * self.new_width / w)
+            frame = cv2.resize(frame, (self.new_width, new_height))
+            color_image = frame.copy()
+
+        # Convert to RGB and normalize
+        img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = img.astype(np.float32) / 255.0
+        img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(self.device)
+
+        # Padding
+        _, _, orig_H, orig_W = img.shape
+        lrtb = utils.get_padding(orig_H, orig_W)
+        img = F.pad(img, lrtb, mode="constant", value=0.0)
+        img = self.normalize(img)
+
+        # Intrinsics
+        if self.intrins is not None:
+            intrins = self.intrins.clone()
+        else:
+            intrins = intrins_from_fov(new_fov=60.0, H=orig_H, W=orig_W, device=self.device).unsqueeze(0)
+
+        intrins[:, 0, 2] += lrtb[0]
+        intrins[:, 1, 2] += lrtb[2]
+
+        self.lrtb = lrtb
+        self.new_H, self.new_W = orig_H, orig_W
+
+        return {"color_image": color_image, "img": img, "intrins": intrins}
+
+    def __del__(self):
+        if hasattr(self, "cap"):
+            self.cap.release()
+
+
+###################################
+
 
 def test(args, model, test_loader, device, results_dir=None):
     with torch.no_grad():
@@ -316,16 +415,21 @@ if __name__ == "__main__":
                 enable_auto_white_balance=True,
             )
 
-        elif "youtube.com" in args.mode:
-            input_name = "youtube"
+        elif args.mode.endswith((".mp4", ".mkv", ".avi", ".mov")):
+            input_name = "video"
             kwargs = dict(
                 intrins=None,
                 new_width=1024,
-                video_id=args.mode.split("watch?v=")[1],
+                video_path=args.mode,
             )
 
         else:
             raise Exception("invalid input option for demo")
 
-        InputStream = define_input(input=input_name, device=device, **kwargs)
+        if input_name == "video":
+            InputStream = VideoInputStream(
+                video_path=kwargs["video_path"], intrins=kwargs["intrins"], new_width=kwargs["new_width"], device=device
+            )
+        else:
+            InputStream = define_input(input=input_name, device=device, **kwargs)
         demo(args, model, InputStream, frame_name=args.ckpt_path)
