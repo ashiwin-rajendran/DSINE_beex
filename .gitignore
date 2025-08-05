@@ -1,1 +1,8 @@
 projects/dsine/checkpoints/
+models/conv_encoder_decoder/__pycache__
+models/dsine/__pycache__
+projects/dsine/__pycache__
+projects/__pycache__
+projects/dsine/experiments/dsine/
+projects/dsine/samples/output/
+utils/__pycache__
