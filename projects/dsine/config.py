@@ -32,8 +32,8 @@ def get_args(test=False):
     parser.add_argument("--NNET_learned_upsampling", default=False, action="store_true")
 
     parser.add_argument("--NRN_prop_ps", type=int, default=5)
-    parser.add_argument("--NRN_num_iter_train", type=int, default=5)
-    parser.add_argument("--NRN_num_iter_test", type=int, default=5)
+    parser.add_argument("--NRN_num_iter_train", type=int, default=1)
+    parser.add_argument("--NRN_num_iter_test", type=int, default=1)
     parser.add_argument("--NRN_ray_relu", default=False, action="store_true")
 
     parser.add_argument("--loss_fn", type=str, default="AL")

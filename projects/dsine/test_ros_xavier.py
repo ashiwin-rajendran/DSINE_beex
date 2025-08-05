@@ -64,6 +64,7 @@ class ROSInputStream:
             # Decode compressed image directly without cv_bridge
             np_arr = np.frombuffer(msg.data, np.uint8)
             cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            cv_image = cv2.resize(cv_image, (640, 360))
             with self.image_lock:
                 self.latest_image = cv_image
         except Exception as e:
